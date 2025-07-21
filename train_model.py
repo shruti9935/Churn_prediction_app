@@ -26,15 +26,18 @@ gender_encoded = 1 if gender == "Male" else 0
 input_data = np.array([gender_encoded, age, 0, tenure, balance, satisfaction, salary])
 
 if st.button("Predict Churn"):
-    input_scaled = scaler.transform([input_data])
-    prediction = model.predict(input_scaled)[0]
-    prob = model.predict_proba(input_scaled)[0][1]
-
-    st.markdown(f"### 🔢 Churn Probability: `{prob:.2%}`")
-    if prediction == 1:
-        st.error("⚠️ This customer is likely to churn.")
+    if not uploaded_file:
+        st.warning("⚠️ Please upload a CSV file first to make predictions.")
     else:
-        st.success("✅ This customer is likely to stay.")
+        input_scaled = scaler.transform([input_data])
+        prediction = model.predict(input_scaled)[0]
+        prob = model.predict_proba(input_scaled)[0][1]
+
+        st.markdown(f"### 🔢 Churn Probability: `{prob:.2%}`")
+        if prediction == 1:
+            st.error("⚠️ This customer is likely to churn.")
+        else:
+            st.success("✅ This customer is likely to stay.")
 
 st.markdown("---")
 st.subheader("📤 Batch Prediction from CSV")
