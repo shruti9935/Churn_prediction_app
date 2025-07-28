@@ -15,7 +15,7 @@ This end-to-end project predicts whether a customer is likely to churn using dem
 ---
 
 ## 🚀 Try the App Live
-🔗 [Insert your Streamlit Cloud app link here]
+🔗 [https://churnpredictionapp-jtmmqkbthjfcdcufpkcdt3.streamlit.app/]
 
 ---
 
@@ -95,12 +95,11 @@ Special shoutout to ChatGPT for guidance and debugging support 🚀
 
 ---
 
-## 🤝 Let's Connect
-If you're a recruiter, hiring manager, or fellow data enthusiast — let’s connect here on [LinkedIn](https://www.linkedin.com/in/your-profile)!
+
 
 💬 Feedback or suggestions? Drop a comment or create an issue.
 
 ---
 
 ### 🔗 License
-MIT License © YourName
+MIT License © SHRUTI
