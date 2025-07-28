@@ -1,9 +1,9 @@
 streamlit
 pandas
 numpy
-scikit-learn
-joblib
 matplotlib
 seaborn
-xgboost
-shap
+scikit-learn
+fuzzywuzzy
+python-Levenshtein
+joblib
