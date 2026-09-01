@@ -1,0 +1,65 @@
+{
+  "features": [
+    "Age",
+    "Tenure",
+    "Balance",
+    "Satisfaction Score",
+    "EstimatedSalary",
+    "Gender"
+  ],
+  "numeric": [
+    "Age",
+    "Tenure",
+    "Balance",
+    "Satisfaction Score",
+    "EstimatedSalary"
+  ],
+  "categorical": [
+    "Gender"
+  ],
+  "categories": {
+    "Gender": [
+      "Female",
+      "Male"
+    ]
+  },
+  "defaults": {
+    "Age": 37.0,
+    "Tenure": 5.0,
+    "Balance": 97819.36,
+    "Satisfaction Score": 3.0,
+    "EstimatedSalary": 99128.13,
+    "Gender": "Male"
+  },
+  "ranges": {
+    "Age": [
+      18.0,
+      92.0
+    ],
+    "Tenure": [
+      0.0,
+      10.0
+    ],
+    "Balance": [
+      0.0,
+      238387.56
+    ],
+    "Satisfaction Score": [
+      1.0,
+      5.0
+    ],
+    "EstimatedSalary": [
+      106.67,
+      199992.48
+    ]
+  },
+  "threshold": 0.5,
+  "model": "Logistic Regression",
+  "trained_rows": 6399,
+  "excluded_columns": [
+    "Complain",
+    "CustomerId",
+    "RowNumber",
+    "Surname"
+  ]
+}

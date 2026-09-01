@@ -1,0 +1,13 @@
+# Local virtualenvs -- never commit these
+enVs/
+venv/
+.venv/
+env/
+
+__pycache__/
+*.py[cod]
+
+.ipynb_checkpoints/
+
+# Dataset is downloaded, not vendored (see README)
+Customer-Churn-Records.csv

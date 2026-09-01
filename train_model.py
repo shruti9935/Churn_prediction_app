@@ -1,115 +1,238 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+"""
+Train the churn model.
+
+This is the TRAINING script. The Streamlit app lives in churn_app.py.
+
+Everything the model needs at prediction time -- imputation, categorical
+encoding and scaling -- is baked into a single sklearn Pipeline. The app never
+transforms anything itself, so training and serving cannot drift apart.
+
+Usage:
+    python train_model.py                       # basic feature set (default)
+    python train_model.py --rich                # adds the stronger columns
+    python train_model.py --data path/to.csv
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
 import joblib
-import matplotlib.pyplot as plt
-import seaborn as sns
-from fuzzywuzzy import process
+import numpy as np
+import pandas as pd
+from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-# Load model and scaler
-model = joblib.load("churn_model.pkl")
-scaler = joblib.load("scaler.pkl")
+TARGET = "Exited"
 
-st.set_page_config(page_title="Churn Prediction App", layout="centered")
-st.markdown("<h1 style='text-align: center; color: teal;'>🔍 Customer Churn Prediction</h1>", unsafe_allow_html=True)
-st.write("Upload your customer data below to predict churn risk and explore insights:")
+# 'Complain' is recorded *after* a customer churns: it correlates with the
+# target at r=0.996 and any model trained on it scores ~99.8% while being
+# useless in production. 'CustomerId'/'RowNumber'/'Surname' are identifiers.
+# Never move anything from this list into a feature set.
+LEAKY_OR_ID_COLUMNS = ["Complain", "CustomerId", "RowNumber", "Surname"]
 
-uploaded_file = st.file_uploader("Upload a CSV file with customer data", type=["csv"])
+# Kept identical to the CSV contract documented in the README.
+BASIC_NUMERIC = ["Age", "Tenure", "Balance", "Satisfaction Score", "EstimatedSalary"]
+BASIC_CATEGORICAL = ["Gender"]
 
-# Utility: Fuzzy match columns
-def match_column(df_columns, target_name, threshold=80):
-    match, score = process.extractOne(target_name.lower(), [col.lower() for col in df_columns])
-    if score >= threshold:
-        for col in df_columns:
-            if col.lower() == match:
-                return col
-    return None
+# Genuinely predictive columns the original feature set left on the table.
+RICH_NUMERIC = BASIC_NUMERIC + [
+    "CreditScore",
+    "NumOfProducts",
+    "IsActiveMember",
+    "HasCrCard",
+]
+RICH_CATEGORICAL = BASIC_CATEGORICAL + ["Geography"]
 
-if uploaded_file is not None:
+
+def build_pipeline(estimator, numeric, categorical, seed=42):
+    """Impute -> encode -> scale -> SMOTE -> estimator, as one fitted object."""
+    preprocessor = ColumnTransformer(
+        [
+            (
+                "num",
+                Pipeline(
+                    [
+                        ("impute", SimpleImputer(strategy="median")),
+                        ("scale", StandardScaler()),
+                    ]
+                ),
+                numeric,
+            ),
+            (
+                "cat",
+                Pipeline(
+                    [
+                        ("impute", SimpleImputer(strategy="most_frequent")),
+                        (
+                            "encode",
+                            OneHotEncoder(handle_unknown="ignore", drop="if_binary"),
+                        ),
+                    ]
+                ),
+                categorical,
+            ),
+        ],
+        remainder="drop",
+    )
+    # SMOTE sits inside the pipeline so it only ever sees training folds.
+    return ImbPipeline(
+        [
+            ("prep", preprocessor),
+            ("smote", SMOTE(random_state=seed)),
+            ("clf", estimator),
+        ]
+    )
+
+
+def evaluate(pipe, X_test, y_test, threshold=0.5):
+    probs = pipe.predict_proba(X_test)[:, 1]
+    preds = (probs >= threshold).astype(int)
+    return {
+        "Accuracy": round(float(accuracy_score(y_test, preds)), 4),
+        "Precision": round(float(precision_score(y_test, preds, zero_division=0)), 4),
+        "Recall": round(float(recall_score(y_test, preds, zero_division=0)), 4),
+        "F1 Score": round(float(f1_score(y_test, preds, zero_division=0)), 4),
+        "ROC AUC": round(float(roc_auc_score(y_test, probs)), 4),
+    }
+
+
+def best_threshold(pipe, X, y):
+    """Pick the probability cut-off that maximises F1 on held-out data."""
+    probs = pipe.predict_proba(X)[:, 1]
+    grid = np.linspace(0.05, 0.95, 91)
+    scores = [f1_score(y, (probs >= t).astype(int), zero_division=0) for t in grid]
+    return float(grid[int(np.argmax(scores))])
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", default="Customer-Churn-Records.csv")
+    parser.add_argument("--rich", action="store_true", help="use the extended feature set")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    csv = Path(args.data)
+    if not csv.exists():
+        raise SystemExit(
+            f"Dataset not found: {csv}\n"
+            "Download 'Customer-Churn-Records.csv' (Kaggle: Bank Customer Churn) "
+            "into this folder, or pass --data /path/to/file.csv"
+        )
+
+    df = pd.read_csv(csv)
+    if TARGET not in df.columns:
+        raise SystemExit(f"'{TARGET}' column missing from {csv}")
+
+    numeric = RICH_NUMERIC if args.rich else BASIC_NUMERIC
+    categorical = RICH_CATEGORICAL if args.rich else BASIC_CATEGORICAL
+    features = numeric + categorical
+
+    missing = [c for c in features if c not in df.columns]
+    if missing:
+        raise SystemExit(f"Dataset is missing required columns: {missing}")
+
+    leaked = [c for c in features if c in LEAKY_OR_ID_COLUMNS]
+    if leaked:  # guard against a future edit quietly reintroducing leakage
+        raise SystemExit(
+            f"Refusing to train: leaky/identifier columns in feature set: {leaked}"
+        )
+
+    X = df[features].copy()
+    y = df[TARGET].astype(int)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=args.seed, stratify=y
+    )
+    # A slice of train is held back purely for choosing the threshold, so the
+    # test set stays untouched until the final report.
+    X_fit, X_val, y_fit, y_val = train_test_split(
+        X_train, y_train, test_size=0.2, random_state=args.seed, stratify=y_train
+    )
+
+    candidates = {
+        "Logistic Regression": LogisticRegression(max_iter=1000, random_state=args.seed),
+        "Random Forest": RandomForestClassifier(
+            n_estimators=300, min_samples_leaf=2, random_state=args.seed, n_jobs=-1
+        ),
+    }
     try:
-        data = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-        st.write("📄 Uploaded Data Preview:")
-        st.dataframe(data.head())
+        from xgboost import XGBClassifier
 
-        expected_features = {
-            "Gender": 0,
-            "Age": 35,
-            "CustomerId": 0,
-            "Tenure": 3,
-            "Balance": 50000.0,
-            "Satisfaction Score": 3,
-            "EstimatedSalary": 100000.0
-        }
+        candidates["XGBoost"] = XGBClassifier(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.1,
+            eval_metric="logloss",
+            random_state=args.seed,
+        )
+    except ImportError:
+        print("[info] xgboost not installed -- skipping that candidate.\n")
 
-        X_input = pd.DataFrame()
-        missing_columns = []
+    print(f"Rows: {len(df)}   Churn rate: {y.mean():.1%}")
+    print(f"Features: {features}\n")
 
-        for col_name, default in expected_features.items():
-            match = match_column(data.columns, col_name)
-            if match:
-                X_input[col_name] = data[match]
-            else:
-                missing_columns.append(col_name)
-                X_input[col_name] = default
+    results, fitted = {}, {}
+    for name, est in candidates.items():
+        pipe = build_pipeline(est, numeric, categorical, args.seed)
+        pipe.fit(X_fit, y_fit)
+        thr = best_threshold(pipe, X_val, y_val)
+        pipe.fit(X_train, y_train)  # refit on all training data
+        results[name] = evaluate(pipe, X_test, y_test, thr)
+        results[name]["Threshold"] = round(thr, 3)
+        fitted[name] = pipe
+        print(f"{name:<22} {results[name]}")
 
-        if X_input['Gender'].dtype == 'object':
-            X_input['Gender'] = X_input['Gender'].map({'Female': 0, 'Male': 1})
+    winner = max(results, key=lambda k: results[k]["ROC AUC"])
+    print(f"\nSelected: {winner} (highest ROC AUC)")
 
-        # Handle missing values (NaNs)
-        imputer = SimpleImputer(strategy='mean')
-        X_input_imputed = pd.DataFrame(imputer.fit_transform(X_input), columns=X_input.columns)
+    pipe = fitted[winner]
+    threshold = results[winner]["Threshold"]
 
-        X_scaled = scaler.transform(X_input_imputed)
-        preds = model.predict(X_scaled)
-        probs = model.predict_proba(X_scaled)[:, 1]
+    # Defaults the app falls back to when an uploaded CSV omits a column.
+    # Medians/modes from the TRAINING split only -- never from user uploads.
+    defaults = {}
+    for col in numeric:
+        defaults[col] = float(np.round(X_train[col].median(), 4))
+    for col in categorical:
+        defaults[col] = str(X_train[col].mode().iloc[0])
 
-        data['Churn Prediction'] = preds
-        data['Churn Probability'] = (probs * 100).round(2)
+    schema = {
+        "features": features,
+        "numeric": numeric,
+        "categorical": categorical,
+        "categories": {
+            c: sorted(X_train[c].dropna().astype(str).unique()) for c in categorical
+        },
+        "defaults": defaults,
+        "ranges": {c: [float(X_train[c].min()), float(X_train[c].max())] for c in numeric},
+        "threshold": threshold,
+        "model": winner,
+        "trained_rows": int(len(X_train)),
+        "excluded_columns": LEAKY_OR_ID_COLUMNS,
+    }
 
-        st.success("✅ Churn prediction completed.")
-        display_cols = ['Churn Prediction', 'Churn Probability']
-        if 'CustomerId' in data.columns:
-            display_cols.insert(0, 'CustomerId')
-        st.dataframe(data[display_cols])
+    joblib.dump(pipe, "churn_pipeline.pkl")
+    Path("model_metrics.json").write_text(json.dumps(results, indent=2))
+    Path("feature_schema.json").write_text(json.dumps(schema, indent=2))
+    print("\nWrote churn_pipeline.pkl, model_metrics.json, feature_schema.json")
 
-        if missing_columns:
-            st.warning(f"⚠️ Using default values for missing columns: {', '.join(missing_columns)}")
 
-        # Gender plot
-        st.markdown("### 👥 Churn Rate by Gender")
-        data['Gender Label'] = X_input_imputed['Gender'].map({0: 'Female', 1: 'Male'})
-        gender_churn = data.groupby('Gender Label')['Churn Prediction'].mean().reset_index()
-        fig1, ax1 = plt.subplots()
-        sns.barplot(data=gender_churn, x='Gender Label', y='Churn Prediction', ax=ax1)
-        ax1.set_ylabel("Churn Rate")
-        ax1.set_xlabel("Gender")
-        st.pyplot(fig1)
-
-        # Balance tier plot
-        st.markdown("### 💰 Churn Rate by Balance Tier")
-        data['Balance Tier'] = pd.cut(X_input_imputed['Balance'], bins=[0, 50000, 100000, 200000],
-                                      labels=['Low', 'Mid', 'High'])
-        balance_churn = data.groupby('Balance Tier')['Churn Prediction'].mean().reset_index()
-        fig2, ax2 = plt.subplots()
-        sns.barplot(data=balance_churn, x='Balance Tier', y='Churn Prediction', ax=ax2)
-        ax2.set_ylabel("Churn Rate")
-        ax2.set_xlabel("Balance Tier")
-        st.pyplot(fig2)
-
-        # Model comparison
-        st.markdown("### 🧐 Model Performance Comparison")
-        comparison_df = pd.DataFrame({
-            "Model": ["Logistic Regression", "Random Forest", "XGBoost"],
-            "Accuracy": [0.73, 0.76, 0.78],
-            "Precision": [0.65, 0.70, 0.72],
-            "Recall": [0.60, 0.68, 0.69],
-            "F1 Score": [0.62, 0.69, 0.71]
-        })
-        comparison_df = comparison_df.round(3)
-        st.dataframe(comparison_df)
-
-    except Exception as e:
-        st.error(f"❌ Error processing file: {e}")
-else:
-    st.warning("⚠️ Please upload a CSV file to continue.")
+if __name__ == "__main__":
+    main()
